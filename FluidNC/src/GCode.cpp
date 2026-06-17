@@ -23,6 +23,8 @@
 
 #include <string.h>  // memset
 #include <math.h>    // sqrt etc.
+#include <vector>
+#include <cstdio>
 
 // Allow iteration over CoordIndex values
 CoordIndex& operator++(CoordIndex& i) {
@@ -738,6 +740,14 @@ Error gc_execute_line(const char* input_line) {
                     case 68:
                         gc_block.modal.io_control = IoControl::SetAnalogImmediate;
                         mg_word_bit               = ModalGroup::MM5;
+                        break;
+                    case 260: // M260 I2C scan / probe / write
+                        gc_block.non_modal_command = NonModal::I2C_Write;
+                        mg_word_bit                = ModalGroup::MM10;
+                        break;
+                    case 261: // M261 I2C read
+                        gc_block.non_modal_command = NonModal::I2C_Read;
+                        mg_word_bit                = ModalGroup::MM10;
                         break;
                     default:
                         return Error::GcodeUnsupportedCommand;  // [Unsupported M command]
@@ -1554,6 +1564,22 @@ Error gc_execute_line(const char* input_line) {
                     bitnum_to_mask(GCodeWord::A) | bitnum_to_mask(GCodeWord::B) | bitnum_to_mask(GCodeWord::C)) |
                        bitnum_to_mask(GCodeWord::U) | bitnum_to_mask(GCodeWord::V) | bitnum_to_mask(GCodeWord::W));  // Remove axis words.
     }
+    if (gc_block.non_modal_command == NonModal::I2C_Write || gc_block.non_modal_command == NonModal::I2C_Read) {
+        // I2C parameters: P=address, Q/R=data bytes, L=read count. Float words default to
+        // NAN when absent so execution can distinguish "not given" from "given as 0".
+        if (!bitnum_is_true(value_words, GCodeWord::P)) {
+            gc_block.values.p = NAN;
+        }
+        if (!bitnum_is_true(value_words, GCodeWord::Q)) {
+            gc_block.values.q = NAN;
+        }
+        if (!bitnum_is_true(value_words, GCodeWord::R)) {
+            gc_block.values.r = NAN;
+        }
+        clear_bits(value_words,
+                   bitnum_to_mask(GCodeWord::P) | bitnum_to_mask(GCodeWord::Q) | bitnum_to_mask(GCodeWord::R) |
+                       bitnum_to_mask(GCodeWord::L));
+    }
     clear_bits(value_words, (bitnum_to_mask(GCodeWord::D) | bitnum_to_mask(GCodeWord::O)));
     if (value_words) {
         return Error::GcodeUnusedWords;  // [Unused words]
@@ -1881,6 +1907,101 @@ Error gc_execute_line(const char* input_line) {
             gc_ngc_changed(CoordIndex::G92);
             gc_wco_changed();
             break;
+        case NonModal::I2C_Write: {
+            // M260 — I2C scan / probe / write. Parameters are value words (axis-independent):
+            //   M260                    → scan bus, list responding addresses
+            //   M260 P<addr>            → probe one address (ACK/NACK)
+            //   M260 P<addr> Q<byte>    → write one byte
+            //   M260 P<addr> Q<b> R<b2> → write two bytes (e.g. register Q, value R)
+            int bus = 0;
+            if (!config || !config->_i2c || bus >= MAX_N_I2C || config->_i2c[bus] == nullptr) {
+                log_warn("I2C: bus 0 not configured");
+                break;
+            }
+            auto busObj = config->_i2c[bus];
+
+            if (isnan(gc_block.values.p)) {
+                // No address → scan. Probe with a 1-byte read; 0-byte writes are
+                // unreliable on ESP-IDF 4.x (i2c_master_write_to_device).
+                std::vector<int> found;
+                for (uint8_t a = 1; a < 127; ++a) {
+                    uint8_t dummy;
+                    if (busObj->read(a, &dummy, 1) == 1) {
+                        found.push_back(a);
+                        log_info("I2C device found at address " << int(a));
+                    }
+                }
+                char buf[700];  // 16 header + 126 addresses × 5 chars (" 0xXX") + null
+                int  pos = snprintf(buf, sizeof(buf), "I2CRESP B%d SCAN:", bus);
+                for (auto a : found) {
+                    if (pos >= (int)sizeof(buf) - 6) {
+                        break;
+                    }
+                    pos += snprintf(buf + pos, sizeof(buf) - pos, " 0x%02X", a);
+                }
+                log_info(buf);
+                break;
+            }
+
+            uint8_t addr = uint8_t(truncf(gc_block.values.p));
+            if (isnan(gc_block.values.q)) {
+                // Address but no data → probe for ACK
+                uint8_t dummy;
+                int     ret = busObj->read(addr, &dummy, 1);
+                char    buf[40];
+                snprintf(buf, sizeof(buf), "I2CRESP B%d A0x%02X %s", bus, addr, ret == 1 ? "ACK" : "NACK");
+                log_info(buf);
+                break;
+            }
+
+            // Write one byte (Q), optionally a second (R)
+            uint8_t bytes[2];
+            int     count    = 0;
+            bytes[count++]   = uint8_t(truncf(gc_block.values.q));
+            if (!isnan(gc_block.values.r)) {
+                bytes[count++] = uint8_t(truncf(gc_block.values.r));
+            }
+            int ret = busObj->write(addr, bytes, count);
+            if (ret != count) {
+                log_warn("I2C write to 0x" << int(addr) << " failed");
+            } else {
+                char buf[40];
+                snprintf(buf, sizeof(buf), "I2CRESP B%d A0x%02X WROTE %d", bus, addr, count);
+                log_info(buf);
+            }
+        } break;
+        case NonModal::I2C_Read: {
+            // M261 P<addr> L<count> — read count bytes from device
+            int bus = 0;
+            if (!config || !config->_i2c || bus >= MAX_N_I2C || config->_i2c[bus] == nullptr) {
+                log_warn("I2C: bus 0 not configured");
+                break;
+            }
+            auto busObj = config->_i2c[bus];
+
+            if (isnan(gc_block.values.p)) {
+                log_warn("I2C read: address P required");
+                break;
+            }
+            uint8_t addr = uint8_t(truncf(gc_block.values.p));
+            int     len  = int(gc_block.values.l);
+            if (len <= 0) {
+                log_warn("I2C read: count L must be > 0");
+                break;
+            }
+            std::vector<uint8_t> bufv(len);
+            int                  ret = busObj->read(addr, bufv.data(), len);
+            if (ret <= 0) {
+                log_warn("I2C read from 0x" << int(addr) << " failed");
+                break;
+            }
+            char buf[800];  // 25 header + 255 bytes × 3 chars (" XX") + null
+            int  pos = snprintf(buf, sizeof(buf), "I2CRESP B%d A0x%02X:", bus, addr);
+            for (int i = 0; i < ret && pos < (int)sizeof(buf) - 4; ++i) {
+                pos += snprintf(buf + pos, sizeof(buf) - pos, " %02X", bufv[i]);
+            }
+            log_info(buf);
+        } break;
         default:
             break;
     }

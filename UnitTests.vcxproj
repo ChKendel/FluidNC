@@ -366,6 +366,7 @@
     <ClCompile Include="X86TestSupport\TestSupport\WString.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="docs\i2c-gcode-integration.md" />
     <None Include="FluidNC\src\Motors\Dynamixel2.md" />
     <None Include="FluidNC\src\Configuration\Parser.md" />
     <None Include="FluidNC\src\Spindles\H2ASpindle.md" />

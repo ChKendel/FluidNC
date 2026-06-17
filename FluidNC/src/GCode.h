@@ -70,6 +70,10 @@ enum class NonModal : gcodenum_t {
     AbsoluteOverride      = 530,  // G53
     SetCoordinateOffset   = 920,  // G92
     ResetCoordinateOffset = 921,  // G92.1
+    // I2C G-code helpers. Parameters use value words (not axis words) so they work
+    // regardless of axis count: P=address, Q/R=data bytes, L=read count.
+    I2C_Write = 2000,  // M260: scan / probe / write
+    I2C_Read  = 2001,  // M261: read
 };
 
 // Modal Group G1: Motion modes
