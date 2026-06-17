@@ -1040,6 +1040,7 @@
     <ClCompile Include="FluidNC\test\Extender\I2CExtenderTests.cpp">
       <Filter>test\Extender</Filter>
     </ClCompile>
+    <ClCompile Include="FluidNC\tests\CommandCompletionTest.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="FluidNC\src\Motors\Dynamixel2.md">
@@ -1069,6 +1070,7 @@
     <None Include="FluidNC\test\UnitTests.md">
       <Filter>test</Filter>
     </None>
+    <None Include="docs\i2c-gcode-integration.md" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="X86TestSupport\TestSupport\TODO.txt">
